@@ -53,6 +53,9 @@ public class CommonCache<T>{
     public UUID setElement(T element){
         var elementObject = new ElementObject(element);
         var key = UUID.randomUUID();
+        //если такой ключ уже есть то генерируем новый
+        while (elementsCashe.containsKey(key))
+            key = UUID.randomUUID();
         elementsCashe.put(key, elementObject);
         return key;
     }
