@@ -5,7 +5,8 @@ import org.jetbrains.annotations.NotNull;
 import java.util.Map;
 import java.util.Timer;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
 //Предполагается что отдельный экземпляр кэша будет хранить элементы одного типа, указанного при создании экземпляра
@@ -13,14 +14,18 @@ public class CommonCache<T>{
     private long timeToLive;
     private long checkTime;
     private Timer timer;
+    private Semaphore semaphore;
     //применена коллекция предназначенная для параллельных операций, поэтому дополнительная синхронизация не требуется
-    private ConcurrentHashMap<UUID, ElementObject> elementsCashe;
+    //элементы сортируются по ключу, поэтому появляется удобная возможность для удаления устаревших ключей
+    private ConcurrentSkipListMap<Long, T> elementsCashe;
+
 
     CommonCache(int timeToLive, @NotNull TimeUnit timeUnit, long checkTimeMillis){
-        elementsCashe = new ConcurrentHashMap<>();
+        elementsCashe = new ConcurrentSkipListMap<>();
         setTimeToLive(timeToLive, timeUnit);
         checkTime = checkTimeMillis;
         timer = new Timer(true);//потоковый демон
+        semaphore = new Semaphore(1);
         //первый запуск произойдет через время checkTime и будет повторяться с тем же интервалом
         timer.schedule(new CheckTime(), checkTime, checkTime);
     }
@@ -39,36 +44,30 @@ public class CommonCache<T>{
         }
     }
 
-    //возвращает null если элемент не найден
-    public T getElement(UUID uuid){
-        var elementObject = GetElementObject(uuid);
-        return elementObject != null ? elementObject.object : null;
-    }
-
-    private ElementObject GetElementObject(UUID uuid){
-        return elementsCashe.getOrDefault(uuid,null);
+    public T getElement(Long key){
+        return elementsCashe.getOrDefault(key,null);
     }
 
     //предполагается что элементы null допустимы
-    public UUID setElement(T element){
-        var elementObject = new ElementObject(element);
-        var key = UUID.randomUUID();
-        //если такой ключ уже есть то генерируем новый
-        while (elementsCashe.containsKey(key))
-            key = UUID.randomUUID();
-        elementsCashe.put(key, elementObject);
+    public  Long setElement(T element) throws InterruptedException {
+        //гарантируем что метод будет использоваться только из одного внешнего потока, благодаря чему Thread.sleep(1)
+        //будет работать корректно
+        semaphore.acquire();
+        var key = System.currentTimeMillis();
+        elementsCashe.put(key, element);
+        //гарантируем отсутствие дублирования ключей, благодаря интервалу между вставками минимум 1 миллисекунда
+        Thread.sleep(1);
+        semaphore.release();
         return key;
     }
-
-    public boolean UpdateElementAddTime(UUID uuid){
-        var elementObject = GetElementObject(uuid);
-        if(elementObject!=null){
-            elementObject.time=System.currentTimeMillis();
-            elementsCashe.put(uuid, elementObject);
-            return true;
+    //метод после обновления времени возвращает новый ключ, если ключ не найден возвращает null
+    public Long UpdateElementAddTime(Long key) throws InterruptedException {
+        var element = getElement(key);
+        if (element != null) {
+            return  setElement(element);
         }
-        else
-            return false;
+        return null;
+
     }
 
     public void ClearCache()
@@ -76,23 +75,10 @@ public class CommonCache<T>{
         elementsCashe.clear();
     }
 
-    private class ElementObject{
-        T object;
-        long time;
-
-        ElementObject(T object){
-            this.object = object;
-            this.time = System.currentTimeMillis();
-        }
-    }
-
     private class CheckTime extends java.util.TimerTask{
         @Override
         public void run() {
-            for (Map.Entry<UUID, ElementObject> element : elementsCashe.entrySet()) {
-                if(System.currentTimeMillis() - element.getValue().time>timeToLive)
-                    elementsCashe.remove(element.getKey());
-            }
+            elementsCashe.headMap(System.currentTimeMillis() - timeToLive).clear();
         }
     }
 }
